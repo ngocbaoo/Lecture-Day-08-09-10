@@ -19,11 +19,78 @@ import os
 import sys
 import argparse
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 # Import graph
 sys.path.insert(0, os.path.dirname(__file__))
-from graph import run_graph, save_trace
+from graph import run_graph
+
+
+def _normalize_mcp_tools(mcp_tools_used: Any) -> list[str]:
+    """Normalize MCP tool list to list[str] for trace schema."""
+    if not isinstance(mcp_tools_used, list):
+        return []
+    tools: list[str] = []
+    for item in mcp_tools_used:
+        if isinstance(item, str):
+            tools.append(item)
+        elif isinstance(item, dict):
+            name = item.get("tool") or item.get("name")
+            if isinstance(name, str) and name.strip():
+                tools.append(name.strip())
+    return tools
+
+
+def _normalize_trace(result: dict, task: str) -> dict:
+    """
+    Build trace payload that matches required schema exactly.
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    run_id = str(result.get("run_id") or f"run_{datetime.now().strftime('%Y-%m-%d_%H%M')}")
+    latency = result.get("latency_ms")
+    try:
+        latency_ms = int(latency) if latency is not None else 0
+    except (TypeError, ValueError):
+        latency_ms = 0
+
+    try:
+        confidence = float(result.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    trace = {
+        "run_id": run_id,
+        "task": str(result.get("task") or task),
+        "supervisor_route": str(result.get("supervisor_route", "")),
+        "route_reason": str(result.get("route_reason", "")),
+        "workers_called": [str(w) for w in result.get("workers_called", []) if str(w).strip()],
+        "mcp_tools_used": _normalize_mcp_tools(result.get("mcp_tools_used", [])),
+        "retrieved_sources": [str(s) for s in result.get("retrieved_sources", []) if str(s).strip()],
+        "final_answer": str(result.get("final_answer", "")),
+        "confidence": confidence,
+        "hitl_triggered": bool(result.get("hitl_triggered", False)),
+        "latency_ms": latency_ms,
+        "timestamp": str(result.get("timestamp") or now),
+    }
+    return trace
+
+
+def _save_trace(trace: dict, output_dir: str = "artifacts/traces") -> str:
+    """Save normalized trace JSON to artifacts/traces."""
+    os.makedirs(output_dir, exist_ok=True)
+    filename = os.path.join(output_dir, f"{trace['run_id']}.json")
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(trace, f, ensure_ascii=False, indent=2)
+    return filename
+
+
+def _make_unique_run_id(base_run_id: str, q_id: str, index: int) -> str:
+    """
+    Ensure trace filename is unique per question/run to avoid overwrite collisions.
+    """
+    suffix = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    safe_base = base_run_id.strip() or "run"
+    return f"{safe_base}_{q_id}_{index:02d}_{suffix}"
 
 
 # ─────────────────────────────────────────────
@@ -52,13 +119,14 @@ def run_test_questions(questions_file: str = "data/test_questions.json") -> list
 
         try:
             result = run_graph(question_text)
-            result["question_id"] = q_id
+            trace = _normalize_trace(result, question_text)
+            trace["run_id"] = _make_unique_run_id(str(trace.get("run_id", "")), q_id, i)
 
-            # Save individual trace
-            trace_file = save_trace(result, f"artifacts/traces")
-            print(f"  ✓ route={result.get('supervisor_route', '?')}, "
-                  f"conf={result.get('confidence', 0):.2f}, "
-                  f"{result.get('latency_ms', 0)}ms")
+            # Save individual trace (required schema)
+            trace_file = _save_trace(trace, "artifacts/traces")
+            print(f"  ✓ route={trace.get('supervisor_route', '?')}, "
+                  f"conf={trace.get('confidence', 0):.2f}, "
+                  f"{trace.get('latency_ms', 0)}ms")
 
             results.append({
                 "id": q_id,
@@ -67,7 +135,8 @@ def run_test_questions(questions_file: str = "data/test_questions.json") -> list
                 "expected_sources": q.get("expected_sources", []),
                 "difficulty": q.get("difficulty", "unknown"),
                 "category": q.get("category", "unknown"),
-                "result": result,
+                "result": trace,
+                "trace_file": trace_file,
             })
 
         except Exception as e:
@@ -185,8 +254,9 @@ def analyze_traces(traces_dir: str = "artifacts/traces") -> dict:
 
     traces = []
     for fname in trace_files:
-        with open(os.path.join(traces_dir, fname)) as f:
-            traces.append(json.load(f))
+        with open(os.path.join(traces_dir, fname), encoding="utf-8") as f:
+            raw = json.load(f)
+        traces.append(_normalize_trace(raw, task=str(raw.get("task", ""))))
 
     # Compute metrics
     routing_counts = {}
@@ -231,6 +301,11 @@ def analyze_traces(traces_dir: str = "artifacts/traces") -> dict:
     return metrics
 
 
+def analyze_trace(traces_dir: str = "artifacts/traces") -> dict:
+    """Backward-compatible alias for README naming."""
+    return analyze_traces(traces_dir)
+
+
 # ─────────────────────────────────────────────
 # 4. Compare Single vs Multi Agent
 # ─────────────────────────────────────────────
@@ -255,13 +330,20 @@ def compare_single_vs_multi(
         "total_questions": 15,
         "avg_confidence": 0.0,          # TODO: Điền từ Day 08 eval.py
         "avg_latency_ms": 0,            # TODO: Điền từ Day 08
-        "abstain_rate": "?",            # TODO: Điền từ Day 08
-        "multi_hop_accuracy": "?",      # TODO: Điền từ Day 08
+        "abstain_rate": 0,            # TODO: Điền từ Day 08
+        "multi_hop_accuracy": 0,      # TODO: Điền từ Day 08
     }
 
     if day08_results_file and os.path.exists(day08_results_file):
         with open(day08_results_file) as f:
             day08_baseline = json.load(f)
+
+    d08_conf = float(day08_baseline.get("avg_confidence", 0) or 0)
+    d08_lat = int(day08_baseline.get("avg_latency_ms", 0) or 0)
+    d09_conf = float(multi_metrics.get("avg_confidence", 0) or 0)
+    d09_lat = int(multi_metrics.get("avg_latency_ms", 0) or 0)
+    conf_delta = round(d09_conf - d08_conf, 3)
+    lat_delta = d09_lat - d08_lat
 
     comparison = {
         "generated_at": datetime.now().isoformat(),
@@ -269,8 +351,8 @@ def compare_single_vs_multi(
         "day09_multi_agent": multi_metrics,
         "analysis": {
             "routing_visibility": "Day 09 có route_reason cho từng câu → dễ debug hơn Day 08",
-            "latency_delta": "TODO: Điền delta latency thực tế",
-            "accuracy_delta": "TODO: Điền delta accuracy thực tế từ grading",
+            "latency_delta": f"{lat_delta:+d} ms (Day09 - Day08)",
+            "accuracy_delta": f"confidence delta {conf_delta:+.3f} (Day09 - Day08)",
             "debuggability": "Multi-agent: có thể test từng worker độc lập. Single-agent: không thể.",
             "mcp_benefit": "Day 09 có thể extend capability qua MCP không cần sửa core. Day 08 phải hard-code.",
         },
