@@ -30,60 +30,34 @@ log(f"raw_records={raw_count}")
 
 ---
 
-## 2. Số liệu / bằng chứng thay đổi (150–200 từ)
+## 2. Một quyết định kỹ thuật (100–150 từ)
 
-**Trước (raw ingestion):**
-
-- Data source: `data/raw/policy_export_dirty.csv` chứa 10 dòng export thô.
-- Tôi kiểm tra schema ingest gồm: `chunk_id`, `doc_id`, `chunk_text`, `effective_date`, `exported_at`.
-- `raw_records=10` là chỉ số đầu tiên được log ngay sau ingest.
-
-**Sau chạy pipeline ingestion:**
-
-- `run_id=2026-04-15T08-12Z` được tạo và ghi trong log.
-- `raw_records=10` được ghi thành công.
-- Artifact log lưu tại: `artifacts/logs/run_2026-04-15T08-12Z.log`.
-
-Phần ingestion của tôi chịu trách nhiệm thu thập và chuyển raw CSV vào pipeline, không bao gồm phần quy trình clean/quality chi tiết sau đó.
+Tôi quyết định giữ phần ingest trong `etl_pipeline.py` đơn giản và chỉ tập trung vào việc đọc raw CSV, xác định schema và ghi log. Thay vì mở rộng trực tiếp các rule clean/quality ở bước này, tôi giữ `load_raw_csv()` chỉ chịu trách nhiệm load dữ liệu thô và `run_id`/`raw_records` được ghi sớm nhất có thể. Quyết định này giúp khi có lỗi ở bước sau, nhóm vẫn có thể kiểm tra ngay đầu vào bằng `artifacts/logs/run_<run_id>.log` mà không phải phân tích toàn bộ flow.
 
 ---
 
-## 3. Cách chạy & reproduce (100–150 từ)
+## 3. Một lỗi hoặc anomaly đã xử lý (100–150 từ)
 
-**Chuỗi lệnh:**
+Triệu chứng tôi gặp là cần xác nhận ingest đã giữ đúng dữ liệu đầu vào trước khi chuyển sang bước clean. Metric phát hiện là `raw_records` trong log. Tôi đã xử lý bằng cách thêm đoạn log `raw_records=10` ngay sau `load_raw_csv()` và lưu lại trong `artifacts/logs/run_2026-04-15T08-12Z.log`, giúp chứng minh pipeline đã ingest đúng 10 bản ghi ban đầu.
 
-```bash
-cd day10/lab
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python etl_pipeline.py run
+---
+
+## 4. Bằng chứng trước / sau (80–120 từ)
+
+**run_id:** `2026-04-15T08-12Z`  
+
+Tôi đã kiểm tra log tại `artifacts/logs/run_2026-04-15T08-12Z.log` và thấy:
+
+```text
+run_id=2026-04-15T08-12Z
+raw_records=10
 ```
 
-**Kết quả mong đợi:**
-
-- Log `run_id` xuất hiện
-- `raw_records=10` được ghi
-- `artifacts/logs/run_<run_id>.log` được tạo
-
-Tôi chỉ cần chạy pipeline này để xác nhận ingestion đã hoạt động đúng; các bước sau đó (clean, validate, embed) là phần tiếp theo của flow nhưng không phải trọng tâm của vai trò ingestion.
+Đây là bằng chứng trực tiếp cho việc ingest thành công 10 dòng raw CSV. Nếu người khác làm bước clean/quality tiếp theo, họ có thể dùng log này để đối chiếu dữ liệu đầu vào.
 
 ---
 
-## 4. Khó khăn & học được (80–120 từ)
+## 5. Cải tiến tiếp theo (40–80 từ)
 
-**Khó khăn:**
+Nếu có thêm 2 giờ, tôi sẽ tách rõ phần ingest riêng khỏi phần clean/validate bằng cách tạo module `ingest.py` chỉ chịu trách nhiệm load CSV và ghi `run_id`/`raw_records`, đồng thời thêm một bước sanity check đầu vào trước khi chuyển cho transform.
 
-- Phân biệt rõ ranh giới ingestion vs cleaning: ingestion phải đảm bảo dữ liệu thô được nạp và log đủ, còn việc xử lý chi tiết thuộc phần transform/quality.
-- Ban đầu tôi có thể bị cuốn vào các rule clean mà quên phải tập trung vào `run_id` và `raw_records`.
-
-**Học được:**
-
-- Dữ liệu đầu vào phải được xác thực sơ bộ và traceable bằng `run_id`.
-- Đoạn log `raw_records` là chỉ số cơ bản nhất để kiểm chứng ingest thành công trước khi chuyển sang bước clean.
-- Cần phối hợp rõ với phần clean/quality để không lặp logic ingest và không mở rộng phạm vi quá sớm.
-
-**Đề xuất:**
-
-- Nên giữ `etl_pipeline.py` phần ingest đơn giản, chỉ extract + schema map + log.
-- Các bước clean/validation nên triển khai ở module riêng để tránh nhập nhằng trách nhiệm.
