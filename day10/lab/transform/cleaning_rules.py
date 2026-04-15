@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -25,6 +26,7 @@ ALLOWED_DOC_IDS = frozenset(
 
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DMY_SLASH = re.compile(r"^(\d{2})/(\d{2})/(\d{4})$")
+_MOJIBAKE_HINTS = ("Ã", "á»", "Ä", "â€™", "â€“", "â€", "Â")
 
 
 def _norm_text(s: str) -> str:
@@ -51,6 +53,53 @@ def _normalize_effective_date(raw: str) -> Tuple[str, str]:
         dd, mm, yyyy = m.group(1), m.group(2), m.group(3)
         return f"{yyyy}-{mm}-{dd}", ""
     return "", "invalid_effective_date_format"
+
+
+def _normalize_exported_at(raw: str) -> Tuple[str, str]:
+    s = (raw or "").strip()
+    if not s:
+        return "", "empty_exported_at"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        try:
+            dt = datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return "", "invalid_exported_at_format"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(), ""
+
+
+def _repair_mojibake(text: str) -> Tuple[str, bool]:
+    fixed = text or ""
+    changed = False
+    replacements = [
+        ("Ãª", "ê"),
+        ("Ã©", "é"),
+        ("Ã¨", "è"),
+        ("Ã ", "à"),
+        ("Ã¡", "á"),
+        ("Ã¢", "â"),
+        ("Ã´", "ô"),
+        ("Ã¹", "ù"),
+        ("Ãº", "ú"),
+        ("Ã¬", "ì"),
+        ("Ã­", "í"),
+        ("Ä‘", "đ"),
+        ("Ã±", "ñ"),
+        ("Ã‡", "Ç"),
+        ("â€™", "'"),
+        ("â€“", "-"),
+        ("â€œ", '"'),
+        ("â€\x9d", '"'),
+        ("â€˜", "'"),
+    ]
+    for bad, good in replacements:
+        if bad in fixed:
+            fixed = fixed.replace(bad, good)
+            changed = True
+    return fixed, changed
 
 
 def load_raw_csv(path: Path) -> List[Dict[str, str]]:
@@ -82,6 +131,9 @@ def clean_rows(
     seen_text: set[str] = set()
     cleaned: List[Dict[str, Any]] = []
     seq = 0
+    text_repaired_count = 0
+    exported_at_normalized_count = 0
+    future_effective_date_count = 0
 
     for raw in rows:
         doc_id = raw.get("doc_id", "")
@@ -111,9 +163,25 @@ def clean_rows(
             )
             continue
 
+        if eff_norm > "2026-04-15":
+            future_effective_date_count += 1
+            quarantine.append(
+                {
+                    **raw,
+                    "reason": "future_effective_date",
+                    "effective_date_normalized": eff_norm,
+                }
+            )
+            continue
+
         if not text:
             quarantine.append({**raw, "reason": "missing_chunk_text"})
             continue
+
+        text_fixed, repaired = _repair_mojibake(text)
+        if repaired:
+            text = text_fixed
+            text_repaired_count += 1
 
         key = _norm_text(text)
         if key in seen_text:
@@ -130,6 +198,19 @@ def clean_rows(
                 )
                 fixed_text += " [cleaned: stale_refund_window]"
 
+        exported_at_norm, exported_at_err = _normalize_exported_at(exported_at)
+        if exported_at_err:
+            quarantine.append(
+                {
+                    **raw,
+                    "reason": exported_at_err,
+                    "effective_date_normalized": eff_norm,
+                }
+            )
+            continue
+        if exported_at_norm != exported_at:
+            exported_at_normalized_count += 1
+
         seq += 1
         cleaned.append(
             {
@@ -137,10 +218,15 @@ def clean_rows(
                 "doc_id": doc_id,
                 "chunk_text": fixed_text,
                 "effective_date": eff_norm,
-                "exported_at": exported_at or "",
+                "exported_at": exported_at_norm,
             }
         )
 
+    clean_rows.last_metrics = {
+        "text_repaired_count": text_repaired_count,
+        "exported_at_normalized_count": exported_at_normalized_count,
+        "future_effective_date_count": future_effective_date_count,
+    }
     return cleaned, quarantine
 
 

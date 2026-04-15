@@ -70,6 +70,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         rows,
         apply_refund_window_fix=not args.no_refund_fix,
     )
+    clean_metrics = getattr(clean_rows, "last_metrics", {})
     cleaned_path = CLEAN_DIR / f"cleaned_{run_id.replace(':', '-')}.csv"
     quar_path = QUAR_DIR / f"quarantine_{run_id.replace(':', '-')}.csv"
     write_cleaned_csv(cleaned_path, cleaned)
@@ -77,6 +78,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     log(f"cleaned_records={len(cleaned)}")
     log(f"quarantine_records={len(quarantine)}")
+    for metric_name in ("text_repaired_count", "exported_at_normalized_count", "future_effective_date_count"):
+        if metric_name in clean_metrics:
+            log(f"{metric_name}={clean_metrics[metric_name]}")
     log(f"cleaned_csv={cleaned_path.relative_to(ROOT)}")
     log(f"quarantine_csv={quar_path.relative_to(ROOT)}")
 
@@ -133,7 +137,7 @@ def cmd_embed_internal(cleaned_csv: Path, *, run_id: str, log) -> bool:
         import chromadb
         from chromadb.utils import embedding_functions
     except ImportError:
-        log("ERROR: chromadb chưa cài. pip install -r requirements.txt")
+        log("ERROR: chromadb not installed. pip install -r requirements.txt")
         return False
 
     db_path = os.environ.get("CHROMA_DB_PATH", str(ROOT / "chroma_db"))

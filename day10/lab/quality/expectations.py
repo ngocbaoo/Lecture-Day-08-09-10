@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
 
@@ -109,6 +110,41 @@ def run_expectations(cleaned_rows: List[Dict[str, Any]]) -> Tuple[List[Expectati
             ok6,
             "halt",
             f"violations={len(bad_hr_annual)}",
+        )
+    )
+
+    # E7: exported_at phải parse được ISO-8601
+    bad_exported_at = []
+    for r in cleaned_rows:
+        raw = (r.get("exported_at") or "").strip()
+        try:
+            datetime.fromisoformat(raw)
+        except ValueError:
+            bad_exported_at.append(r)
+    ok7 = len(bad_exported_at) == 0
+    results.append(
+        ExpectationResult(
+            "exported_at_iso8601_for_all_rows",
+            ok7,
+            "halt",
+            f"non_iso_exported_at_rows={len(bad_exported_at)}",
+        )
+    )
+
+    # E8: tránh mojibake còn sót lại trong cleaned text
+    mojibake_hints = ("Ã", "á»", "Ä", "â€™", "â€“", "â€", "Â")
+    bad_mojibake = [
+        r
+        for r in cleaned_rows
+        if any(h in (r.get("chunk_text") or "") for h in mojibake_hints)
+    ]
+    ok8 = len(bad_mojibake) == 0
+    results.append(
+        ExpectationResult(
+            "no_mojibake_artifacts_in_chunk_text",
+            ok8,
+            "warn",
+            f"mojibake_rows={len(bad_mojibake)}",
         )
     )
 
